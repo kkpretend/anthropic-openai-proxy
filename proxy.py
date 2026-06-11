@@ -788,12 +788,14 @@ def auto_convert_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_upstream_headers(api_key: str, incoming_headers: Any, source_format: str = "anthropic") -> dict[str, str]:
-    # 转换为 OpenAI 规范时（从 Anthropic → OpenAI）使用 codex
-    # 转换为 Anthropic 规范时（从 OpenAI → Anthropic）使用 claude
+    # 转换为 OpenAI 规范时（从 Anthropic → OpenAI）使用 claude
+    # 转换为 Anthropic 规范时（从 OpenAI → Anthropic）使用 Codex Desktop
     if source_format == "anthropic":
-        user_agent = "Codex Desktop/0.130.0-alpha.5 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.506.31421)"
-    else:
+        # Anthropic → OpenAI 转换，使用 claude
         user_agent = "claude/1.0"  # TODO: 待更新真实 claude User-Agent
+    else:
+        # OpenAI → Anthropic 转换，使用 Codex Desktop
+        user_agent = "Codex Desktop/0.130.0-alpha.5 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.506.31421)"
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -1165,9 +1167,15 @@ class AnthropicOpenAIProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_upstream_http_error(self, exc: error.HTTPError) -> None:
+        error_body = read_http_error_body(exc)
+        if self.config.debug:
+            print(f"\n=== Upstream Error ===", flush=True)
+            print(f"HTTP {exc.code}", flush=True)
+            print(f"Response: {error_body}", flush=True)
+            print(f"=======================\n", flush=True)
         self.send_json(
             exc.code,
-            anthropic_error("api_error", read_http_error_body(exc) or f"upstream HTTP {exc.code}"),
+            anthropic_error("api_error", error_body or f"upstream HTTP {exc.code}"),
         )
 
     def write_sse(self, event: str, data: dict[str, Any]) -> None:
