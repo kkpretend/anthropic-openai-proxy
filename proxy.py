@@ -852,7 +852,7 @@ class AnthropicOpenAIProxyHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, {
                 "object": "list",
                 "data": [
-                    {"id": "5.4", "object": "model", "owned_by": "xhyapi"},
+                    {"id": "gpt-5.4", "object": "model", "owned_by": "xhyapi"},
                     {"id": "gpt-5.5", "object": "model", "owned_by": "xhyapi"},
                     {"id": "claude-3-5-sonnet-20241022", "object": "model", "owned_by": "xhyapi"},
                     {"id": "claude-3-5-haiku-20241022", "object": "model", "owned_by": "xhyapi"},
