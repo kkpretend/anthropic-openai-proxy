@@ -788,14 +788,14 @@ def auto_convert_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_upstream_headers(api_key: str, incoming_headers: Any, source_format: str = "anthropic") -> dict[str, str]:
-    # 转换为 OpenAI 规范时（从 Anthropic → OpenAI）使用 claude
-    # 转换为 Anthropic 规范时（从 OpenAI → Anthropic）使用 Codex Desktop
+    # 转换为 OpenAI 规范时（从 Anthropic → OpenAI）使用 Codex Desktop
+    # 转换为 Anthropic 规范时（从 OpenAI → Anthropic）使用 claude
     if source_format == "anthropic":
-        # Anthropic → OpenAI 转换，使用 claude
-        user_agent = "claude/1.0"  # TODO: 待更新真实 claude User-Agent
-    else:
-        # OpenAI → Anthropic 转换，使用 Codex Desktop
+        # Anthropic → OpenAI 转换，发送给 OpenAI 上游，使用 Codex Desktop
         user_agent = "Codex Desktop/0.130.0-alpha.5 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.506.31421)"
+    else:
+        # OpenAI → Anthropic 转换，发送给 Anthropic 上游，使用 claude
+        user_agent = "claude/1.0"  # TODO: 待更新真实 claude User-Agent
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -892,7 +892,7 @@ class AnthropicOpenAIProxyHandler(BaseHTTPRequestHandler):
             openai_payload = anthropic_messages_to_openai(payload)
             if self.config.debug:
                 source_format = "anthropic"  # 主要路径是 Anthropic → OpenAI
-                ua = "claude/1.0" if source_format == "anthropic" else "Codex Desktop/0.130.0-alpha.5"
+                ua = "Codex Desktop/0.130.0-alpha.5" if source_format == "anthropic" else "claude/1.0"
                 print(
                     f"forwarding /v1/messages model={openai_payload.get('model')} "
                     f"stream={openai_payload.get('stream')} upstream={chat_completions_url(self.config.openai_base_url)} "
