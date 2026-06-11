@@ -892,7 +892,7 @@ class AnthropicOpenAIProxyHandler(BaseHTTPRequestHandler):
             openai_payload = anthropic_messages_to_openai(payload)
             if self.config.debug:
                 source_format = "anthropic"  # 主要路径是 Anthropic → OpenAI
-                ua = "codex/1.0" if source_format == "anthropic" else "claude/1.0"
+                ua = "claude/1.0" if source_format == "anthropic" else "Codex Desktop/0.130.0-alpha.5"
                 print(
                     f"forwarding /v1/messages model={openai_payload.get('model')} "
                     f"stream={openai_payload.get('stream')} upstream={chat_completions_url(self.config.openai_base_url)} "
