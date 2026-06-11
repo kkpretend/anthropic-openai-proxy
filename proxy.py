@@ -776,12 +776,16 @@ def auto_convert_payload(payload: dict[str, Any]) -> dict[str, Any]:
     raise ValueError(f"unsupported payload format: {detected}")
 
 
-def build_upstream_headers(api_key: str, incoming_headers: Any) -> dict[str, str]:
+def build_upstream_headers(api_key: str, incoming_headers: Any, source_format: str = "anthropic") -> dict[str, str]:
+    # 转换为 OpenAI 规范时（从 Anthropic → OpenAI）使用 codex
+    # 转换为 Anthropic 规范时（从 OpenAI → Anthropic）使用 claude
+    user_agent = "codex/1.0" if source_format == "anthropic" else "claude/1.0"
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 auto/1.0",
+        "User-Agent": user_agent,
     }
 
     organization = incoming_headers.get("openai-organization")
