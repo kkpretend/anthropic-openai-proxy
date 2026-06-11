@@ -863,9 +863,12 @@ class AnthropicOpenAIProxyHandler(BaseHTTPRequestHandler):
 
             openai_payload = anthropic_messages_to_openai(payload)
             if self.config.debug:
+                source_format = "anthropic"  # 主要路径是 Anthropic → OpenAI
+                ua = "codex/1.0" if source_format == "anthropic" else "claude/1.0"
                 print(
                     f"forwarding /v1/messages model={openai_payload.get('model')} "
-                    f"stream={openai_payload.get('stream')} upstream={chat_completions_url(self.config.openai_base_url)}",
+                    f"stream={openai_payload.get('stream')} upstream={chat_completions_url(self.config.openai_base_url)} "
+                    f"User-Agent={ua}",
                     flush=True,
                 )
 
@@ -1100,10 +1103,18 @@ class AnthropicOpenAIProxyHandler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def call_upstream(self, openai_payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+        headers = build_upstream_headers(api_key, self.headers)
+        if self.config.debug:
+            print(f"\n=== Upstream Request ===", flush=True)
+            print(f"URL: {chat_completions_url(self.config.openai_base_url)}", flush=True)
+            print(f"Headers: {headers}", flush=True)
+            print(f"Body preview: {str(compact_json(openai_payload))[:500]}...", flush=True)
+            print(f"=======================\n", flush=True)
+
         req = request.Request(
             chat_completions_url(self.config.openai_base_url),
             data=compact_json(openai_payload),
-            headers=build_upstream_headers(api_key, self.headers),
+            headers=headers,
             method="POST",
         )
         try:
