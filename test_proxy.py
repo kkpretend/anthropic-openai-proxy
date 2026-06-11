@@ -238,6 +238,191 @@ class ProxyConversionTests(unittest.TestCase):
             ],
         )
 
+    def test_openai_request_converts_to_anthropic(self):
+        converted = proxy.openai_messages_to_anthropic(
+            {
+                "model": "gpt-compatible",
+                "messages": [
+                    {"role": "system", "content": "Be brief."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+                        ],
+                    },
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": '{"city":"Beijing"}',
+                                },
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+                ],
+                "max_tokens": 128,
+                "stop": ["</done>"],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "Get weather.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+            }
+        )
+
+        self.assertEqual(converted["system"], "Be brief.")
+        self.assertEqual(converted["max_tokens"], 128)
+        self.assertEqual(converted["stop_sequences"], ["</done>"])
+        self.assertEqual(converted["tool_choice"], {"type": "any"})
+        self.assertEqual(
+            converted["tools"],
+            [
+                {
+                    "name": "get_weather",
+                    "description": "Get weather.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                }
+            ],
+        )
+        self.assertEqual(
+            converted["messages"],
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": "image/png", "data": "abc"},
+                        },
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "get_weather",
+                            "input": {"city": "Beijing"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": "sunny",
+                        }
+                    ],
+                },
+            ],
+        )
+
+    def test_anthropic_response_converts_to_openai(self):
+        converted = proxy.anthropic_response_to_openai(
+            {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-compatible",
+                "content": [
+                    {"type": "text", "text": "checking"},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "get_weather",
+                        "input": {"city": "Beijing"},
+                    },
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 5, "output_tokens": 6},
+            }
+        )
+
+        self.assertEqual(converted["id"], "msg_1")
+        self.assertEqual(converted["object"], "chat.completion")
+        self.assertEqual(converted["model"], "claude-compatible")
+        self.assertEqual(converted["usage"], {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11})
+        self.assertEqual(converted["choices"][0]["finish_reason"], "tool_calls")
+        self.assertEqual(
+            converted["choices"][0]["message"],
+            {
+                "role": "assistant",
+                "content": "checking",
+                "tool_calls": [
+                    {
+                        "id": "toolu_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city":"Beijing"}',
+                        },
+                    }
+                ],
+            },
+        )
+
+    def test_auto_detects_openai_request_and_converts_to_anthropic(self):
+        converted = proxy.auto_convert_payload(
+            {
+                "model": "gpt-compatible",
+                "messages": [
+                    {"role": "system", "content": "Be brief."},
+                    {"role": "user", "content": "hello"},
+                ],
+                "max_tokens": 32,
+            }
+        )
+
+        self.assertEqual(
+            converted,
+            {
+                "model": "gpt-compatible",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 32,
+                "system": "Be brief.",
+            },
+        )
+
+    def test_auto_detects_anthropic_response_and_converts_to_openai(self):
+        converted = proxy.auto_convert_payload(
+            {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-compatible",
+                "content": [{"type": "text", "text": "done"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            }
+        )
+
+        self.assertEqual(converted["object"], "chat.completion")
+        self.assertEqual(converted["choices"][0]["message"]["content"], "done")
+        self.assertEqual(converted["choices"][0]["finish_reason"], "stop")
+
     def test_api_key_passthrough_headers(self):
         headers = Message()
         headers["x-api-key"] = "sk-test"
@@ -346,6 +531,48 @@ class ProxyHTTPTests(unittest.TestCase):
                     ],
                     "stream": False,
                     "max_tokens": 32,
+                },
+            )
+        finally:
+            proxy_server.shutdown()
+            proxy_server.server_close()
+
+    def test_auto_convert_endpoint_returns_opposite_format(self):
+        proxy_server = proxy.make_server(
+            "127.0.0.1",
+            0,
+            proxy.ProxyConfig("http://127.0.0.1:1/v1", 10),
+        )
+        proxy_port = proxy_server.server_address[1]
+
+        start_threaded_server(proxy_server)
+        try:
+            body = json.dumps(
+                {
+                    "model": "gpt-compatible",
+                    "messages": [
+                        {"role": "system", "content": "Be brief."},
+                        {"role": "user", "content": "hello"},
+                    ],
+                    "max_tokens": 32,
+                }
+            ).encode("utf-8")
+            req = request.Request(
+                f"http://127.0.0.1:{proxy_port}/convert/auto",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(req, timeout=10) as response:
+                converted = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(
+                converted,
+                {
+                    "model": "gpt-compatible",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 32,
+                    "system": "Be brief.",
                 },
             )
         finally:

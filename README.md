@@ -6,7 +6,8 @@
 - 对内转发到 OpenAI Chat Completions: `POST {OPENAI_BASE_URL}/chat/completions`
 - API key 从入站请求透传：优先读取 `x-api-key`，其次读取 `Authorization: Bearer ...`
 - 支持非流式和 `stream: true` 的 SSE 流式响应
-- 支持单独把 Anthropic 请求 JSON 转换成 OpenAI 请求 JSON，不请求上游
+- 支持单独做 Anthropic/OpenAI 双向 JSON 转换，不请求上游
+- 支持自动检测 JSON 格式并转换为另一种格式
 - 仅依赖 Python 标准库
 
 ## 启动
@@ -71,7 +72,7 @@ print(message.content[0].text)
 
 ## 只转换不转发
 
-如果只想检查 Anthropic 请求体会被转换成什么 OpenAI 请求体，可以调用：
+显式 Anthropic -> OpenAI：
 
 ```bash
 curl http://127.0.0.1:8080/convert/anthropic-to-openai \
@@ -100,17 +101,71 @@ curl http://127.0.0.1:8080/convert/anthropic-to-openai \
 }
 ```
 
-也支持别名：
+显式 OpenAI -> Anthropic：
+
+```bash
+curl http://127.0.0.1:8080/convert/openai-to-anthropic \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "your-openai-model",
+    "messages": [
+      {"role": "system", "content": "You are concise."},
+      {"role": "user", "content": "hello"}
+    ],
+    "max_tokens": 1024
+  }'
+```
+
+返回示例：
+
+```json
+{
+  "model": "your-openai-model",
+  "messages": [
+    {"role": "user", "content": "hello"}
+  ],
+  "max_tokens": 1024,
+  "system": "You are concise."
+}
+```
+
+自动检测并转换成另一种格式：
+
+```bash
+curl http://127.0.0.1:8080/convert/auto \
+  -H 'content-type: application/json' \
+  -d @request-or-response.json
+```
+
+支持的转换接口：
 
 ```text
+/convert/anthropic-to-openai
 /v1/convert/anthropic-to-openai
+/convert/openai-to-anthropic
+/v1/convert/openai-to-anthropic
+/convert/auto
+/v1/convert/auto
 ```
 
 CLI 转换：
 
 ```bash
 python3 proxy.py --convert anthropic-to-openai < anthropic-request.json
+python3 proxy.py --convert openai-to-anthropic < openai-request.json
+python3 proxy.py --convert auto < request-or-response.json
 ```
+
+自动检测支持这几类 JSON：
+
+| 输入格式 | 输出格式 |
+| --- | --- |
+| Anthropic Messages request | OpenAI Chat Completions request |
+| OpenAI Chat Completions request | Anthropic Messages request |
+| Anthropic message response | OpenAI chat completion response |
+| OpenAI chat completion response | Anthropic message response |
+
+完全简单的 `{"model": "...", "messages": [...]}` 请求在两边都近似合法，自动模式会默认按 Anthropic request 处理并输出 OpenAI request。
 
 ## curl 验证
 
@@ -173,6 +228,17 @@ Anthropic 入参会转换为 OpenAI 入参：
 ```
 
 OpenAI 上游返回 `tool_calls` 时，会转换为 Anthropic `tool_use` content block；流式 `delta.tool_calls` 会转换为 Anthropic SSE 的 `tool_use` / `input_json_delta`。
+
+OpenAI -> Anthropic 转换也会处理常见字段：
+
+| OpenAI | Anthropic |
+| --- | --- |
+| `role=system` / `role=developer` message | 顶层 `system` |
+| `stop` | `stop_sequences` |
+| `tools[].function.parameters` | `tools[].input_schema` |
+| assistant `tool_calls` | assistant `tool_use` |
+| `role=tool` message | user `tool_result` |
+| image `image_url` | Anthropic image content block |
 
 如果你需要向 OpenAI-compatible 上游传递额外非标准字段，可以放在 `extra_body` 中，它们会被合并进上游请求体：
 

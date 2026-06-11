@@ -33,6 +33,14 @@ CONVERT_ANTHROPIC_TO_OPENAI_PATHS = {
     "/convert/anthropic-to-openai",
     "/v1/convert/anthropic-to-openai",
 }
+CONVERT_OPENAI_TO_ANTHROPIC_PATHS = {
+    "/convert/openai-to-anthropic",
+    "/v1/convert/openai-to-anthropic",
+}
+CONVERT_AUTO_PATHS = {
+    "/convert/auto",
+    "/v1/convert/auto",
+}
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -350,6 +358,276 @@ def anthropic_tool_choice_to_openai(tool_choice: Any) -> Any:
     return tool_choice
 
 
+def openai_finish_to_anthropic_stop(finish_reason: str | None) -> str | None:
+    return openai_finish_to_anthropic(finish_reason)
+
+
+def anthropic_stop_reason_to_openai_finish(stop_reason: str | None) -> str | None:
+    if stop_reason is None:
+        return None
+    return {
+        "end_turn": "stop",
+        "max_tokens": "length",
+        "stop_sequence": "stop",
+        "tool_use": "tool_calls",
+    }.get(stop_reason, stop_reason)
+
+
+def openai_stop_to_anthropic_stop_sequences(stop: Any) -> list[str] | None:
+    if stop is None:
+        return None
+    if isinstance(stop, list):
+        return [str(item) for item in stop]
+    return [str(stop)]
+
+
+def data_uri_to_anthropic_image_source(url: str) -> dict[str, Any]:
+    if url.startswith("data:") and ";base64," in url:
+        header, data = url.split(";base64,", 1)
+        media_type = header[5:] or "application/octet-stream"
+        return {"type": "base64", "media_type": media_type, "data": data}
+    return {"type": "url", "url": url}
+
+
+def openai_content_block_to_anthropic(block: Any) -> dict[str, Any]:
+    if isinstance(block, str):
+        return {"type": "text", "text": block}
+    if not isinstance(block, dict):
+        return {"type": "text", "text": str(block)}
+
+    block_type = block.get("type")
+    if block_type in {"text", "input_text"}:
+        return {"type": "text", "text": block.get("text", "")}
+
+    if block_type in {"image_url", "input_image"}:
+        image_url = block.get("image_url") or block.get("image") or {}
+        url = image_url.get("url") if isinstance(image_url, dict) else image_url
+        return {"type": "image", "source": data_uri_to_anthropic_image_source(str(url or ""))}
+
+    return {"type": "text", "text": json.dumps(block, ensure_ascii=False)}
+
+
+def openai_content_to_anthropic(content: Any) -> Any:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        converted = [openai_content_block_to_anthropic(block) for block in content]
+        if all(block.get("type") == "text" for block in converted):
+            return "".join(block.get("text", "") for block in converted)
+        return converted
+    return str(content)
+
+
+def content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                block_type = block.get("type")
+                if block_type in {"text", "input_text"}:
+                    parts.append(block.get("text", ""))
+                elif block_type == "image_url":
+                    parts.append(json.dumps(block, ensure_ascii=False))
+                else:
+                    parts.append(json.dumps(block, ensure_ascii=False))
+            else:
+                parts.append(str(block))
+        return "".join(parts)
+    return str(content)
+
+
+def openai_tool_call_to_anthropic_tool_use(tool_call: dict[str, Any]) -> dict[str, Any]:
+    function = tool_call.get("function") or {}
+    return {
+        "type": "tool_use",
+        "id": tool_call.get("id") or f"toolu_{uuid.uuid4().hex}",
+        "name": function.get("name") or "tool",
+        "input": parse_tool_arguments(function.get("arguments")),
+    }
+
+
+def openai_message_to_anthropic_message(message: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    role = message.get("role")
+    content = message.get("content")
+
+    if role in {"system", "developer"}:
+        return None, content_to_text(content)
+
+    if role == "tool":
+        return (
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": message.get("tool_call_id") or message.get("id") or "",
+                        "content": content_to_text(content),
+                    }
+                ],
+            },
+            None,
+        )
+
+    if role == "assistant":
+        content_blocks: list[dict[str, Any]] = []
+        converted_content = openai_content_to_anthropic(content)
+        if isinstance(converted_content, str):
+            if converted_content:
+                content_blocks.append({"type": "text", "text": converted_content})
+        elif isinstance(converted_content, list):
+            content_blocks.extend(converted_content)
+
+        for tool_call in message.get("tool_calls") or []:
+            if isinstance(tool_call, dict):
+                content_blocks.append(openai_tool_call_to_anthropic_tool_use(tool_call))
+
+        if content_blocks:
+            return {"role": "assistant", "content": content_blocks}, None
+        return {"role": "assistant", "content": ""}, None
+
+    anthropic_role = "assistant" if role == "assistant" else "user"
+    return {"role": anthropic_role, "content": openai_content_to_anthropic(content)}, None
+
+
+def openai_tools_to_anthropic(tools: Any) -> Any:
+    if not isinstance(tools, list):
+        return tools
+
+    converted = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("input_schema"):
+            converted.append(tool)
+            continue
+        function = tool.get("function") or {}
+        name = function.get("name") or tool.get("name")
+        if not name:
+            continue
+        anthropic_tool: dict[str, Any] = {
+            "name": name,
+            "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
+        }
+        if function.get("description"):
+            anthropic_tool["description"] = function["description"]
+        converted.append(anthropic_tool)
+    return converted
+
+
+def openai_tool_choice_to_anthropic(tool_choice: Any) -> Any:
+    if isinstance(tool_choice, str):
+        if tool_choice == "required":
+            return {"type": "any"}
+        return {"type": tool_choice}
+    if not isinstance(tool_choice, dict):
+        return tool_choice
+
+    if tool_choice.get("type") == "function":
+        function = tool_choice.get("function") or {}
+        return {"type": "tool", "name": function.get("name") or ""}
+    return tool_choice
+
+
+def openai_messages_to_anthropic(payload: dict[str, Any]) -> dict[str, Any]:
+    anthropic_payload: dict[str, Any] = {
+        "model": payload.get("model"),
+        "messages": [],
+    }
+
+    max_tokens = payload.get("max_tokens", payload.get("max_completion_tokens"))
+    if max_tokens is not None:
+        anthropic_payload["max_tokens"] = max_tokens
+
+    for key in ("temperature", "top_p", "stream"):
+        if key in payload and payload[key] is not None:
+            anthropic_payload[key] = payload[key]
+
+    stop_sequences = openai_stop_to_anthropic_stop_sequences(payload.get("stop"))
+    if stop_sequences is not None:
+        anthropic_payload["stop_sequences"] = stop_sequences
+
+    if payload.get("tools") is not None:
+        anthropic_payload["tools"] = openai_tools_to_anthropic(payload["tools"])
+    if payload.get("tool_choice") is not None:
+        anthropic_payload["tool_choice"] = openai_tool_choice_to_anthropic(payload["tool_choice"])
+    if payload.get("user"):
+        anthropic_payload["metadata"] = {"user_id": str(payload["user"])}
+
+    system_parts: list[str] = []
+    messages: list[dict[str, Any]] = []
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        converted_message, system_text = openai_message_to_anthropic_message(message)
+        if system_text:
+            system_parts.append(system_text)
+        if converted_message is not None:
+            messages.append(converted_message)
+
+    if system_parts:
+        anthropic_payload["system"] = "\n\n".join(part for part in system_parts if part)
+    anthropic_payload["messages"] = messages
+
+    return {key: value for key, value in anthropic_payload.items() if value is not None}
+
+
+def anthropic_usage_to_openai(usage: dict[str, Any] | None) -> dict[str, int]:
+    usage = usage or {}
+    prompt_tokens = int(usage.get("input_tokens") or 0)
+    completion_tokens = int(usage.get("output_tokens") or 0)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+
+
+def anthropic_response_to_openai(anthropic_body: dict[str, Any]) -> dict[str, Any]:
+    text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+
+    for block in anthropic_body.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            text_parts.append(block.get("text", ""))
+        elif block_type == "tool_use":
+            tool_calls.append(anthropic_tool_use_to_openai_tool_call(block))
+
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(text_parts) if text_parts else None,
+    }
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    if message["content"] is None and not tool_calls:
+        message["content"] = ""
+
+    return {
+        "id": anthropic_body.get("id") or f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": anthropic_body.get("model"),
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": anthropic_stop_reason_to_openai_finish(anthropic_body.get("stop_reason")),
+            }
+        ],
+        "usage": anthropic_usage_to_openai(anthropic_body.get("usage")),
+    }
+
+
 def openai_usage_to_anthropic(usage: dict[str, Any] | None) -> dict[str, int]:
     usage = usage or {}
     return {
@@ -401,6 +679,101 @@ def openai_response_to_anthropic(openai_body: dict[str, Any], model: str | None)
         "stop_sequence": None,
         "usage": openai_usage_to_anthropic(openai_body.get("usage")),
     }
+
+
+def content_blocks_contain_type(content: Any, block_types: set[str]) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(block, dict) and block.get("type") in block_types for block in content)
+
+
+def has_anthropic_tool_schema(payload: dict[str, Any]) -> bool:
+    tools = payload.get("tools")
+    return isinstance(tools, list) and any(isinstance(tool, dict) and "input_schema" in tool for tool in tools)
+
+
+def has_openai_tool_schema(payload: dict[str, Any]) -> bool:
+    tools = payload.get("tools")
+    return isinstance(tools, list) and any(
+        isinstance(tool, dict) and tool.get("type") == "function" and isinstance(tool.get("function"), dict)
+        for tool in tools
+    )
+
+
+def detect_request_format(payload: dict[str, Any]) -> str:
+    if payload.get("system") is not None or payload.get("stop_sequences") is not None or payload.get("extra_body"):
+        return "anthropic_request"
+    if has_anthropic_tool_schema(payload):
+        return "anthropic_request"
+
+    tool_choice = payload.get("tool_choice")
+    if isinstance(tool_choice, dict) and tool_choice.get("type") in {"any", "tool"}:
+        return "anthropic_request"
+
+    if has_openai_tool_schema(payload):
+        return "openai_request"
+    if any(key in payload for key in ("response_format", "logit_bias", "max_completion_tokens")):
+        return "openai_request"
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+        return "openai_request"
+
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role in {"system", "developer", "tool"}:
+            return "openai_request"
+        if "tool_calls" in message or "function_call" in message:
+            return "openai_request"
+
+        content = message.get("content")
+        if content_blocks_contain_type(content, {"tool_use", "tool_result", "image"}):
+            return "anthropic_request"
+        if content_blocks_contain_type(content, {"image_url", "input_text", "input_image"}):
+            return "openai_request"
+
+    # A plain {"model": "...", "messages": [{"role": "user", "content": "..."}]}
+    # is valid enough for both APIs. Prefer the proxy's primary use case.
+    return "anthropic_request"
+
+
+def detect_payload_format(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+
+    if payload.get("type") == "message" and isinstance(payload.get("content"), list):
+        return "anthropic_response"
+
+    if payload.get("object") in {"chat.completion", "chat.completion.chunk"}:
+        return "openai_response"
+    if isinstance(payload.get("choices"), list):
+        return "openai_response"
+
+    if isinstance(payload.get("messages"), list):
+        return detect_request_format(payload)
+
+    raise ValueError("unable to detect Anthropic or OpenAI JSON format")
+
+
+def convert_anthropic_to_openai_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if detect_payload_format(payload) == "anthropic_response":
+        return anthropic_response_to_openai(payload)
+    return anthropic_messages_to_openai(payload)
+
+
+def convert_openai_to_anthropic_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if detect_payload_format(payload) == "openai_response":
+        return openai_response_to_anthropic(payload, payload.get("model"))
+    return openai_messages_to_anthropic(payload)
+
+
+def auto_convert_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    detected = detect_payload_format(payload)
+    if detected in {"anthropic_request", "anthropic_response"}:
+        return convert_anthropic_to_openai_payload(payload)
+    if detected in {"openai_request", "openai_response"}:
+        return convert_openai_to_anthropic_payload(payload)
+    raise ValueError(f"unsupported payload format: {detected}")
 
 
 def build_upstream_headers(api_key: str, incoming_headers: Any) -> dict[str, str]:
@@ -460,7 +833,13 @@ class AnthropicOpenAIProxyHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
         if path in CONVERT_ANTHROPIC_TO_OPENAI_PATHS:
-            self.convert_anthropic_to_openai()
+            self.convert_payload("anthropic-to-openai")
+            return
+        if path in CONVERT_OPENAI_TO_ANTHROPIC_PATHS:
+            self.convert_payload("openai-to-anthropic")
+            return
+        if path in CONVERT_AUTO_PATHS:
+            self.convert_payload("auto")
             return
 
         if path != ANTHROPIC_MESSAGES_PATH:
@@ -499,10 +878,18 @@ class AnthropicOpenAIProxyHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, anthropic_error("api_error", str(exc)))
 
-    def convert_anthropic_to_openai(self) -> None:
+    def convert_payload(self, mode: str) -> None:
         try:
             payload = read_json_body(self)
-            self.send_json(HTTPStatus.OK, anthropic_messages_to_openai(payload))
+            if mode == "anthropic-to-openai":
+                converted = convert_anthropic_to_openai_payload(payload)
+            elif mode == "openai-to-anthropic":
+                converted = convert_openai_to_anthropic_payload(payload)
+            elif mode == "auto":
+                converted = auto_convert_payload(payload)
+            else:
+                raise ValueError(f"unknown conversion mode: {mode}")
+            self.send_json(HTTPStatus.OK, converted)
         except json.JSONDecodeError:
             self.send_json(HTTPStatus.BAD_REQUEST, anthropic_error("invalid_request_error", "invalid JSON body"))
         except ValueError as exc:
@@ -784,7 +1171,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true", default=env_bool("DEBUG", False))
     parser.add_argument(
         "--convert",
-        choices=["anthropic-to-openai"],
+        choices=["anthropic-to-openai", "openai-to-anthropic", "auto"],
         help="read a JSON request from stdin, print the converted JSON, and exit",
     )
     return parser.parse_args()
@@ -792,9 +1179,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.convert == "anthropic-to-openai":
+    if args.convert:
         payload = json.loads(sys.stdin.read())
-        converted = anthropic_messages_to_openai(payload)
+        if args.convert == "anthropic-to-openai":
+            converted = convert_anthropic_to_openai_payload(payload)
+        elif args.convert == "openai-to-anthropic":
+            converted = convert_openai_to_anthropic_payload(payload)
+        else:
+            converted = auto_convert_payload(payload)
         print(json.dumps(converted, ensure_ascii=False, indent=2))
         return
 
