@@ -24,6 +24,12 @@ from urllib import error, request
 # falls back to the OPENAI_BASE_URL environment variable.
 OPENAI_BASE_URL = "https://xhyapi.com"
 
+# Model mapping: client model -> upstream model
+MODEL_MAP = {
+    # "claude-3-5-sonnet-20241022": "gpt-4",
+    # "gpt-5.5": "gpt-4o",
+}
+
 DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8080
@@ -276,8 +282,13 @@ def anthropic_messages_to_openai(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         messages.extend(anthropic_message_to_openai_messages(message))
 
+    # Apply model mapping
+    model = payload.get("model")
+    if model in MODEL_MAP:
+        model = MODEL_MAP[model]
+
     openai_payload: dict[str, Any] = {
-        "model": payload.get("model"),
+        "model": model,
         "messages": messages,
         "stream": bool(payload.get("stream", False)),
     }
@@ -835,6 +846,18 @@ class AnthropicOpenAIProxyHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
             self.send_json(HTTPStatus.OK, {"ok": True})
+            return
+        if self.path == "/v1/models":
+            # 返回支持的模型列表，兼容 Claude CLI
+            self.send_json(HTTPStatus.OK, {
+                "object": "list",
+                "data": [
+                    {"id": "5.4", "object": "model", "owned_by": "xhyapi"},
+                    {"id": "gpt-5.5", "object": "model", "owned_by": "xhyapi"},
+                    {"id": "claude-3-5-sonnet-20241022", "object": "model", "owned_by": "xhyapi"},
+                    {"id": "claude-3-5-haiku-20241022", "object": "model", "owned_by": "xhyapi"},
+                ]
+            })
             return
         self.send_json(HTTPStatus.NOT_FOUND, anthropic_error("not_found_error", "not found"))
 
