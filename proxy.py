@@ -22,7 +22,7 @@ from urllib import error, request
 
 # Fill this with your OpenAI-compatible upstream. If left empty, the service
 # falls back to the OPENAI_BASE_URL environment variable.
-OPENAI_BASE_URL = "http://your-openai-compatible-host/v1"
+OPENAI_BASE_URL = "https://xhyapi.com"
 
 DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_HOST = "0.0.0.0"
@@ -56,13 +56,13 @@ def compact_json(value: Any) -> bytes:
 
 def normalize_base_url(base_url: str) -> str:
     base_url = base_url.rstrip("/")
-    if base_url.endswith("/chat/completions"):
-        return base_url[: -len("/chat/completions")]
+    if base_url.endswith("/responses"):
+        return base_url[: -len("/responses")]
     return base_url
 
 
 def chat_completions_url(base_url: str) -> str:
-    return f"{normalize_base_url(base_url)}/chat/completions"
+    return f"{normalize_base_url(base_url)}/responses"
 
 
 def resolve_openai_base_url(cli_base_url: str | None = None) -> str:
@@ -781,6 +781,7 @@ def build_upstream_headers(api_key: str, incoming_headers: Any) -> dict[str, str
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 auto/1.0",
     }
 
     organization = incoming_headers.get("openai-organization")
